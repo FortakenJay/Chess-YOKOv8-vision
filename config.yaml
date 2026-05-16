@@ -1,8 +1,8 @@
 esp32_url: "http://127.0.0.1:8080/stream"
 corner_model_path: "models/corners.pt"
 piece_model_path: "models/pieces.pt"
-corner_conf: 0.5
-piece_conf: 0.4
+corner_conf: 0.3
+piece_conf: 0.15
 smoothing_frames: 5
 warp_size: 800
 min_board_area_px: 40000

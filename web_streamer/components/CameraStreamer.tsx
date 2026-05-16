@@ -3,20 +3,41 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type BridgeConfig,
+  DEFAULT_BRIDGE_HOST,
+  DEFAULT_BRIDGE_PORT,
   STORAGE_KEYS,
   uploadFrame,
 } from "@/lib/bridge";
+import { cameraBlockedMessage, cameraStatus, canUseCamera } from "@/lib/camera";
 
 function readStored(key: string, fallback: string): string {
-  if (typeof window === "undefined") return fallback;
   return window.localStorage.getItem(key) ?? fallback;
 }
 
 function readStoredBool(key: string, fallback: boolean): boolean {
-  if (typeof window === "undefined") return fallback;
   const raw = window.localStorage.getItem(key);
   if (raw === null) return fallback;
   return raw === "1";
+}
+
+async function canvasToJpegBlob(
+  canvas: HTMLCanvasElement,
+  quality = 0.6,
+): Promise<Blob | null> {
+  // Older iOS Safari can intermittently return null from toBlob.
+  const blob = await new Promise<Blob | null>((resolve) => {
+    canvas.toBlob(resolve, "image/jpeg", quality);
+  });
+  if (blob) return blob;
+
+  // Fallback path for legacy Safari: dataURL -> Blob.
+  try {
+    const dataUrl = canvas.toDataURL("image/jpeg", quality);
+    const response = await fetch(dataUrl);
+    return await response.blob();
+  } catch {
+    return null;
+  }
 }
 
 export default function CameraStreamer() {
@@ -27,40 +48,54 @@ export default function CameraStreamer() {
   const uploadingRef = useRef(false);
   const isStreamingRef = useRef(false);
 
-  const [host, setHost] = useState(() =>
-    readStored(STORAGE_KEYS.host, "192.168.0.10"),
-  );
-  const [port, setPort] = useState(() => readStored(STORAGE_KEYS.port, "8080"));
-  const [flipH, setFlipH] = useState(() =>
-    readStoredBool(STORAGE_KEYS.flipH, false),
-  );
-  const [flipV, setFlipV] = useState(() =>
-    readStoredBool(STORAGE_KEYS.flipV, false),
-  );
+  const [host, setHost] = useState(DEFAULT_BRIDGE_HOST);
+  const [port, setPort] = useState(DEFAULT_BRIDGE_PORT);
+  const [flipH, setFlipH] = useState(false);
+  const [flipV, setFlipV] = useState(false);
+  const [prefsReady, setPrefsReady] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [statusText, setStatusText] = useState("Ready");
   const [senderFps, setSenderFps] = useState(0);
   const [lastError, setLastError] = useState<string | null>(null);
   const [cameraReady, setCameraReady] = useState(false);
+  const [cameraAllowed, setCameraAllowed] = useState(true);
+  const [cameraBlockReason, setCameraBlockReason] = useState<"insecure-context" | "no-api" | null>(null);
 
   const sentTimestampsRef = useRef<number[]>([]);
   const configRef = useRef<BridgeConfig>({ host, port, flipH, flipV });
 
   useEffect(() => {
+    setHost(readStored(STORAGE_KEYS.host, DEFAULT_BRIDGE_HOST));
+    setPort(readStored(STORAGE_KEYS.port, DEFAULT_BRIDGE_PORT));
+    setFlipH(readStoredBool(STORAGE_KEYS.flipH, false));
+    setFlipV(readStoredBool(STORAGE_KEYS.flipV, false));
+    setPrefsReady(true);
+
+    const status = cameraStatus();
+    const allowed = status.ok;
+    setCameraAllowed(allowed);
+    if (!allowed) {
+      setCameraBlockReason(status.reason);
+      setLastError(cameraBlockedMessage());
+      setStatusText(status.reason === "insecure-context" ? "HTTPS required" : "Camera unavailable");
+    }
+  }, []);
+
+  useEffect(() => {
     configRef.current = { host, port, flipH, flipV };
+    if (!prefsReady) return;
     window.localStorage.setItem(STORAGE_KEYS.host, host);
     window.localStorage.setItem(STORAGE_KEYS.port, port);
     window.localStorage.setItem(STORAGE_KEYS.flipH, flipH ? "1" : "0");
     window.localStorage.setItem(STORAGE_KEYS.flipV, flipV ? "1" : "0");
-  }, [host, port, flipH, flipV]);
+  }, [host, port, flipH, flipV, prefsReady]);
 
   useEffect(() => {
     isStreamingRef.current = isStreaming;
   }, [isStreaming]);
 
-  const canStream =
-    host.trim().length > 0 && port.trim().length > 0;
+  const canStream = cameraAllowed;
 
   const stopMedia = useCallback(() => {
     if (rafRef.current !== null) {
@@ -76,18 +111,29 @@ export default function CameraStreamer() {
   }, []);
 
   const startMedia = useCallback(async () => {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error("Camera API not available in this browser");
+    if (!canUseCamera()) {
+      throw new Error(cameraBlockedMessage());
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-      },
-      audio: false,
-    });
+    let stream: MediaStream;
+    try {
+      // Prefer lighter constraints first; older phones (iPhone 7) are more stable here.
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 10, max: 15 },
+        },
+        audio: false,
+      });
+    } catch {
+      // Last-resort fallback for strict legacy Safari implementations.
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: false,
+      });
+    }
 
     mediaStreamRef.current = stream;
     const video = videoRef.current;
@@ -98,20 +144,52 @@ export default function CameraStreamer() {
     video.srcObject = stream;
     video.playsInline = true;
     video.muted = true;
-    await video.play();
+    video.autoplay = true;
+    (video as HTMLVideoElement & { setAttribute: typeof video.setAttribute }).setAttribute(
+      "webkit-playsinline",
+      "true",
+    );
+
+    await video.play().catch(() => {});
+
+    await new Promise<void>((resolve) => {
+      const done = () => resolve();
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
+        done();
+        return;
+      }
+      const onAny = () => {
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          video.removeEventListener("playing", onAny);
+          video.removeEventListener("loadeddata", onAny);
+          video.removeEventListener("loadedmetadata", onAny);
+          done();
+        }
+      };
+      video.addEventListener("playing", onAny);
+      video.addEventListener("loadeddata", onAny);
+      video.addEventListener("loadedmetadata", onAny);
+    });
+
     setCameraReady(true);
   }, []);
 
   const captureAndUpload = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+    if (!video || !canvas) return;
+
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      setStatusText(`Waiting for video data (readyState=${video.readyState})…`);
       return;
     }
 
     const w = video.videoWidth;
     const h = video.videoHeight;
-    if (w === 0 || h === 0) return;
+    if (w === 0 || h === 0) {
+      setStatusText("Waiting for camera frame…");
+      return;
+    }
 
     canvas.width = w;
     canvas.height = h;
@@ -120,9 +198,7 @@ export default function CameraStreamer() {
 
     ctx.drawImage(video, 0, 0, w, h);
 
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, "image/jpeg", 0.72);
-    });
+    const blob = await canvasToJpegBlob(canvas, 0.6);
     if (!blob) return;
 
     await uploadFrame(configRef.current, blob);
@@ -132,7 +208,7 @@ export default function CameraStreamer() {
       (t) => now - t <= 2000,
     );
     setSenderFps(sentTimestampsRef.current.length / 2);
-    setStatusText("Streaming");
+    setStatusText(`Streaming · ${w}×${h}`);
     setLastError(null);
   }, []);
 
@@ -162,15 +238,16 @@ export default function CameraStreamer() {
 
   const startStreaming = useCallback(async () => {
     if (!canStream) {
-      setStatusText("Enter bridge host and port");
+      setStatusText("HTTPS required for camera");
       return;
     }
     try {
       setLastError(null);
       setStatusText("Starting camera...");
       await startMedia();
+      isStreamingRef.current = true;
       setIsStreaming(true);
-      setStatusText("Streaming");
+      setStatusText("Waiting for first frame…");
       sentTimestampsRef.current = [];
       pumpFrames();
     } catch (err) {
@@ -182,6 +259,7 @@ export default function CameraStreamer() {
   }, [canStream, pumpFrames, startMedia, stopMedia]);
 
   const stopStreaming = useCallback(() => {
+    isStreamingRef.current = false;
     setIsStreaming(false);
     setStatusText("Stopped");
     setSenderFps(0);
@@ -240,11 +318,13 @@ export default function CameraStreamer() {
         />
       )}
 
-      {!cameraReady && !isStreaming && (
+      {!cameraReady && !isStreaming && cameraAllowed && (
         <p className="pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 text-center text-sm text-white/80">
           Tap Start Streaming — allow camera access
         </p>
       )}
+
+      {cameraBlockReason && <CameraBlockedOverlay reason={cameraBlockReason} />}
     </Shell>
   );
 }
@@ -376,9 +456,12 @@ function SettingsModal({
           className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-3 text-base text-white"
           value={host}
           onChange={(e) => onHost(e.target.value)}
-          inputMode="decimal"
-          autoCapitalize="off"
+          inputMode="url"
+          autoCapitalize="none"
           autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="192.168.0.2"
         />
       </label>
       <label className="mb-4 block text-sm text-zinc-400">
@@ -388,11 +471,12 @@ function SettingsModal({
           value={port}
           onChange={(e) => onPort(e.target.value)}
           inputMode="numeric"
+          placeholder="8080"
         />
       </label>
       <p className="mb-4 text-xs text-zinc-500">
-        Safari live camera via getUserMedia. Frames POST to bridge /frame; CV reads
-        /stream.
+        Only needed on plain HTTP. When using the Cloudflare tunnel URL
+        (npm run dev:phone) frames are proxied automatically — this field is ignored.
       </p>
       <button
         type="button"
@@ -402,6 +486,37 @@ function SettingsModal({
         Done
       </button>
     </SettingsOverlay>
+  );
+}
+
+function CameraBlockedOverlay({ reason }: { reason: "insecure-context" | "no-api" }) {
+  return (
+    <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-5 bg-black/92 px-6 text-center">
+      <p className="text-4xl">🔒</p>
+      {reason === "insecure-context" ? (
+        <>
+          <h2 className="text-lg font-bold text-red-400">Camera blocked — HTTP not allowed</h2>
+          <p className="text-sm leading-relaxed text-white/80">
+            Safari blocks camera access on plain <span className="font-mono text-yellow-300">http://</span> addresses.
+          </p>
+          <div className="w-full rounded-xl border border-white/10 bg-zinc-900 p-4 text-left text-xs text-white/70">
+            <p className="mb-2 font-semibold text-white">Fix — on your PC:</p>
+            <p className="mb-1 font-mono text-green-400">cd web_streamer</p>
+            <p className="font-mono text-green-400">npm run dev:phone</p>
+            <p className="mt-3 mb-1 text-white/50">Wait for the line:</p>
+            <p className="font-mono text-sky-300">https://xxxx.trycloudflare.com</p>
+            <p className="mt-3 text-white/50">Then open THAT URL on iPhone Safari.</p>
+          </div>
+        </>
+      ) : (
+        <>
+          <h2 className="text-lg font-bold text-red-400">Camera API unavailable</h2>
+          <p className="text-sm leading-relaxed text-white/80">
+            Try Safari. Other browsers may not support camera capture.
+          </p>
+        </>
+      )}
+    </div>
   );
 }
 

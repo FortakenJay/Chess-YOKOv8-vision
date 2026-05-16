@@ -4,12 +4,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Literal
 
 import chess
 
 BoardMap = dict[tuple[int, int], str]
 GameResult = Literal["white", "black", "draw", "unknown"]
+
+
+class Orientation(str, Enum):
+    """Camera/board orientation used to map pixel coordinates to chess squares.
+
+    OVERHEAD_WHITE_BOTTOM – top-down camera, white pieces at the bottom of the frame.
+    OVERHEAD_WHITE_TOP    – top-down camera, white pieces at the top of the frame.
+    SIDE_WHITE_LEFT       – side/tripod camera, white pieces on the LEFT of the frame.
+    SIDE_WHITE_RIGHT      – side/tripod camera, white pieces on the RIGHT of the frame.
+    """
+
+    OVERHEAD_WHITE_BOTTOM = "overhead_white_bottom"
+    OVERHEAD_WHITE_TOP = "overhead_white_top"
+    SIDE_WHITE_LEFT = "side_white_left"
+    SIDE_WHITE_RIGHT = "side_white_right"
 
 
 @dataclass(slots=True)

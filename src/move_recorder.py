@@ -7,7 +7,7 @@ from collections.abc import Callable
 import chess
 
 from .errors import IllegalMoveError
-from .types import GameState, MoveEvent
+from .types import GameState, MoveEvent, Orientation
 
 
 class MoveRecorder:
@@ -16,10 +16,10 @@ class MoveRecorder:
     def __init__(
         self,
         starting_fen: str = chess.STARTING_FEN,
-        white_bottom: bool = True,
+        orientation: Orientation = Orientation.OVERHEAD_WHITE_BOTTOM,
         promotion_selector: Callable[[str], str] | None = None,
     ) -> None:
-        self.white_bottom = white_bottom
+        self.orientation = orientation
         self.promotion_selector = promotion_selector
         self.board = chess.Board(starting_fen)
         self.starting_fen = starting_fen

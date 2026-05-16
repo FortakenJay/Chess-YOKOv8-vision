@@ -36,8 +36,20 @@ Dev server binds `0.0.0.0:3000` so your phone can reach it on LAN.
 
 ### 3) iPhone Safari
 
-1. Same Wi-Fi as PC.
-2. Open `http://<PC_LAN_IP>:3000` (from `ipconfig` on Windows).
+1. Same Wi-Fi as PC (not cellular, not guest Wi-Fi with client isolation).
+2. On Windows run `ipconfig` and find **IPv4** (example: `192.168.0.2`).
+3. Open **`http://192.168.0.2:3000`** on iPhone (use your real IP, not `0.0.0.0` or `localhost`).
+
+**If the page won't load or is broken:**
+
+1. **Restart** `npm run dev` after any `next.config.ts` change.
+2. **Windows Firewall** — allow inbound TCP port 3000 (Private network):
+
+   ```powershell
+   netsh advfirewall firewall add rule name="Next.js dev 3000" dir=in action=allow protocol=TCP localport=3000
+   ```
+
+3. **Next.js 16 LAN block** — if the terminal shows `Blocked cross-origin request ... allowedDevOrigins`, add your PC IP to `allowedDevOrigins` in `next.config.ts` (already set for `192.168.0.2` in this repo).
 3. Tap **Settings** (gear) → set **PC LAN IP** and port `8080`.
 4. Tap **Start Streaming** and allow camera access.
 5. Keep Safari in the foreground.

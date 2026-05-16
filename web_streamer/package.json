@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "certs:gen": "powershell -ExecutionPolicy Bypass -File ./scripts/gen-dev-cert.ps1",
+    "firewall:open": "powershell -ExecutionPolicy Bypass -File ./scripts/open-firewall.ps1",
     "dev": "next dev -H 0.0.0.0 -p 3000",
+    "dev:phone": "node ./scripts/phone-dev.mjs",
+    "dev:https": "powershell -ExecutionPolicy Bypass -File ./scripts/dev-https.ps1",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"

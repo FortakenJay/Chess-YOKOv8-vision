@@ -46,6 +46,45 @@ class DisplayRenderer:
         self.hud_font_scale = hud_font_scale
         self.grid_opacity = grid_opacity
         self.highlight_opacity = highlight_opacity
+        # BGR colors tuned for vivid high-contrast overlays.
+        self.neon_green = (57, 255, 20)
+
+    def _piece_color(self, label: str) -> tuple[int, int, int]:
+        piece_name = label.split("-")[1] if "-" in label else label
+        palette: dict[str, tuple[int, int, int]] = {
+            "king": (0, 215, 255),    # gold
+            "queen": (255, 0, 255),   # magenta
+            "rook": (255, 128, 0),    # orange
+            "bishop": (0, 255, 255),  # yellow
+            "knight": (255, 0, 128),  # pink-red
+            "pawn": (255, 255, 0),    # cyan
+        }
+        return palette.get(piece_name, (255, 255, 255))
+
+    def _draw_neon_corner_dots(self, image: np.ndarray, corners: np.ndarray) -> None:
+        for x, y in corners.astype(int):
+            p = (int(x), int(y))
+            # Outer glow + bright center for a "neon" look.
+            cv2.circle(image, p, 14, self.neon_green, 2)
+            cv2.circle(image, p, 6, self.neon_green, -1)
+
+    def _draw_board_boundary(self, image: np.ndarray, corners: np.ndarray) -> None:
+        pts = corners.astype(int).reshape(-1, 1, 2)
+        cv2.polylines(image, [pts], isClosed=True, color=self.neon_green, thickness=2)
+
+    @staticmethod
+    def _project_square_to_raw(
+        file_idx: int,
+        rank_idx: int,
+        cell: int,
+        inverse_h: np.ndarray,
+    ) -> np.ndarray:
+        x1 = file_idx * cell
+        y1 = rank_idx * cell
+        x2 = x1 + cell
+        y2 = y1 + cell
+        square = np.array([[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]], dtype=np.float32)
+        return cv2.perspectiveTransform(square, inverse_h).astype(int)
 
     def render_raw(
         self,
@@ -61,14 +100,14 @@ class DisplayRenderer:
     ) -> np.ndarray:
         out = frame.copy()
         if corners is not None:
-            pts = corners.astype(int).reshape(-1, 1, 2)
-            cv2.polylines(out, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
-            for x, y in corners.astype(int):
-                cv2.circle(out, (int(x), int(y)), 8, (0, 255, 0), -1)
+            self._draw_board_boundary(out, corners)
+            self._draw_neon_corner_dots(out, corners)
         elif last_corners is not None:
             pts = last_corners.astype(int).reshape(-1, 1, 2)
             cv2.polylines(out, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
             cv2.putText(out, "CORNERS LOST", (12, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        else:
+            cv2.putText(out, "NO BOARD CORNERS - overlays paused", (12, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
         status_color = {
             "CONNECTED": (0, 255, 0),
@@ -81,6 +120,85 @@ class DisplayRenderer:
         _draw_text_line(out, f"Game: {game_status}", 3, (255, 255, 0), self.hud_font_scale)
         if last_move_san:
             _draw_text_line(out, f"Last move: {last_move_san}", 4, (255, 255, 255), self.hud_font_scale)
+        return out
+
+    def render_chess_vision(
+        self,
+        frame: np.ndarray,
+        corners: np.ndarray | None,
+        detections: list[DetectedPiece],
+        inverse_h: np.ndarray | None,
+        connection_status: str,
+        stable_fen: str,
+        move_number: int,
+        side_to_move: str,
+        game_status: str,
+        last_move_san: str | None,
+        last_corners: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Render single-window chess vision overlay on the camera frame.
+
+        Piece bounding boxes are projected from warped board coordinates back
+        into the raw camera image using the inverse perspective matrix.
+        Drawing order (bottom → top): raw image, board boundary, piece boxes.
+        """
+        out = self.render_raw(
+            frame=frame,
+            corners=corners,
+            last_corners=last_corners,
+            connection_status=connection_status,
+            stable_fen=stable_fen,
+            move_number=move_number,
+            side_to_move=side_to_move,
+            game_status=game_status,
+            last_move_san=last_move_san,
+        )
+
+        _draw_text_line(
+            out,
+            f"detections: {len(detections)}",
+            5,
+            (200, 200, 200),
+            self.hud_font_scale,
+        )
+
+        if not detections or inverse_h is None:
+            return out
+
+        for det in detections:
+            color = self._piece_color(det.label)
+            box_pts = np.array(
+                [[[det.x1, det.y1], [det.x2, det.y1], [det.x2, det.y2], [det.x1, det.y2]]],
+                dtype=np.float32,
+            )
+            projected = cv2.perspectiveTransform(box_pts, inverse_h).astype(int)
+            cv2.polylines(out, [projected], isClosed=True, color=color, thickness=2)
+
+            anchor_x, anchor_y = projected[0][0]
+            tag = self._short_piece(det.label)
+            if self.show_confidence_scores:
+                tag = f"{tag} {det.confidence:.2f}"
+            (text_w, text_h), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            label_x = int(anchor_x)
+            label_y = max(text_h + 4, int(anchor_y) - 4)
+            cv2.rectangle(
+                out,
+                (label_x - 1, label_y - text_h - 4),
+                (label_x + text_w + 4, label_y + 2),
+                (0, 0, 0),
+                -1,
+            )
+            cv2.putText(
+                out,
+                tag,
+                (label_x + 2, label_y - 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
         return out
 
     def _square_rect(self, square: str) -> tuple[int, int, int, int]:

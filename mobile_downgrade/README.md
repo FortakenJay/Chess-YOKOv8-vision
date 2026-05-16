@@ -1,37 +1,73 @@
-# Chess Phone Cam (Downgraded)
+# Chess Phone Cam (Expo Dev Client + Vision Camera)
 
-Temporary Expo app matching `mobile/` streamer functionality on an older SDK.
+SDK 54 app with **expo-dev-client** and **react-native-vision-camera** for faster live frame capture than Expo Go (`takePictureAsync`).
 
-- SDK: `expo ~54`
-- Purpose: run with older Expo Go when SDK 55 is not yet available on your device.
+Streams JPEG frames to the desktop bridge:
 
-## Run
+- Phone → `POST http://<pc-ip>:8080/frame`
+- Bridge → `GET http://127.0.0.1:8080/stream`
+- Pipeline → `main.py`
 
-From `mobile_downgrade/`:
+## Important: not Expo Go
+
+This app **does not run in Expo Go**. You need a **development build** (custom dev client).
+
+## Build dev client (no Mac — EAS cloud)
+
+1. Install EAS CLI and log in:
+
+   ```bash
+   npm install -g eas-cli
+   eas login
+   ```
+
+2. From this folder:
+
+   ```bash
+   cd mobile_downgrade
+   eas build:configure
+   eas build --profile development --platform ios
+   ```
+
+3. When the build finishes, open the install link on your iPhone (or download `.ipa` for AltStore).
+
+4. Start Metro for the dev client:
+
+   ```bash
+   npm install
+   npm start
+   ```
+
+5. Open the **Chess Phone Cam Downgrade** app (not Expo Go) and load the bundle.
+
+## Run with pipeline
+
+**PC — bridge:**
+
+```powershell
+.\venv\Scripts\python.exe code/phone_stream_bridge.py --host 0.0.0.0 --port 8080
+```
+
+**Phone — app:**
+
+- Settings (gear) → PC LAN IP + port `8080`
+- **Start Streaming**
+
+**PC — verify:**
+
+```powershell
+.\venv\Scripts\python.exe code/view_esp32_stream.py --url http://127.0.0.1:8080/stream
+.\venv\Scripts\python.exe main.py
+```
+
+## No-build alternative
+
+Use `web_streamer/` in iPhone Safari — no EAS, no AltStore.
+
+## Android
 
 ```bash
-npm install
-npx expo start
+eas build --profile development --platform android
 ```
 
-Then scan the QR in Expo Go.
-
-## Stream flow
-
-1. Start bridge from repo root:
-
-```powershell
-.\.venv\Scripts\python code/phone_stream_bridge.py --host 0.0.0.0 --port 8080
-```
-
-1. In the app:
-
-- Host = your PC LAN IP
-- Port = `8080`
-- Tap **Start Streaming**
-
-1. Verify desktop stream:
-
-```powershell
-.\.venv\Scripts\python code/view_esp32_stream.py --url http://127.0.0.1:8080/stream
-```
+Install APK, then `npm start` and open the dev client app.

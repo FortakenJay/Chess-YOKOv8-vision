@@ -29,7 +29,7 @@ def is_valid_jpeg(data: bytes) -> bool:
 class FrameStore:
     """Thread-safe latest-frame store with ingest stats."""
 
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    lock: threading.RLock = field(default_factory=threading.RLock)
     condition: threading.Condition = field(init=False)
     latest_frame: bytes | None = None
     frame_id: int = 0
@@ -108,7 +108,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
     """HTTP bridge endpoints: POST /frame, GET /stream, GET /health."""
 
     server_version = "PhoneMJPEGBridge/0.1"
-    protocol_version = "HTTP/1.1"
+    protocol_version = "HTTP/1.0"
     stream_clients: ClassVar[int] = 0
     stream_clients_lock: ClassVar[threading.Lock] = threading.Lock()
 
@@ -129,6 +129,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
+        LOGGER.info("do_POST path=%s from=%s len=%s", self.path, self.client_address[0], self.headers.get("Content-Length"))
         if self.path != "/frame":
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
             return
@@ -167,6 +168,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"ok":true}')
 
     def do_GET(self) -> None:  # noqa: N802
+        LOGGER.info("do_GET path=%s from=%s", self.path, self.client_address[0])
         if self.path == "/health":
             self._send_health()
             return
@@ -247,24 +249,28 @@ def main() -> None:
     LOGGER.info("Bridge listening on http://%s:%s", args.host, args.port)
     LOGGER.info("Endpoints: POST /frame, GET /stream, GET /health")
 
-    last_log = time.monotonic()
-    try:
+    def status_logger() -> None:
         while True:
-            server.handle_request()
-            now = time.monotonic()
-            if now - last_log >= 5.0:
-                health = STORE.health()
-                LOGGER.info(
-                    "ingest_fps=%.2f clients=%d last_sender=%s drops=%d age_ms=%s",
-                    health["ingest_fps_5s"],
-                    BridgeHandler.stream_clients,
-                    health["last_sender_ip"],
-                    health["dropped_frames"],
-                    health["last_frame_age_ms"],
-                )
-                last_log = now
+            time.sleep(5.0)
+            health = STORE.health()
+            LOGGER.info(
+                "ingest_fps=%.2f clients=%d last_sender=%s drops=%d age_ms=%s",
+                health["ingest_fps_5s"],
+                BridgeHandler.stream_clients,
+                health["last_sender_ip"],
+                health["dropped_frames"],
+                health["last_frame_age_ms"],
+            )
+
+    logger_thread = threading.Thread(target=status_logger, daemon=True)
+    logger_thread.start()
+
+    try:
+        server.serve_forever()
     except KeyboardInterrupt:
         LOGGER.info("Shutting down bridge.")
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":

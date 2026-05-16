@@ -11,12 +11,21 @@ export function bridgeFrameUrl(config: BridgeConfig): string {
   return `http://${host}:${port}/frame`;
 }
 
+/** Same-origin upload when HTTPS (avoids mixed content + works on iPhone). */
+export function getFrameUploadUrl(config: BridgeConfig): string {
+  if (typeof window === "undefined") return "/api/frame";
+  if (window.isSecureContext) return "/api/frame";
+  const host = window.location.hostname;
+  if (host === "localhost" || host === "127.0.0.1") return "/api/frame";
+  return bridgeFrameUrl(config);
+}
+
 export async function uploadFrame(
   config: BridgeConfig,
   jpegBlob: Blob,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(bridgeFrameUrl(config), {
+  const response = await fetch(getFrameUploadUrl(config), {
     method: "POST",
     headers: {
       "Content-Type": "image/jpeg",
@@ -28,9 +37,19 @@ export async function uploadFrame(
   });
 
   if (!response.ok) {
-    throw new Error(`Bridge returned ${response.status}`);
+    let message = `Upload failed (${response.status})`;
+    try {
+      const data = (await response.json()) as { error?: string };
+      if (data.error) message = data.error;
+    } catch {
+      /* non-JSON body */
+    }
+    throw new Error(message);
   }
 }
+
+export const DEFAULT_BRIDGE_HOST = "192.168.0.2";
+export const DEFAULT_BRIDGE_PORT = "8080";
 
 export const STORAGE_KEYS = {
   host: "chess-bridge-host",

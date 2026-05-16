@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import chess
 import cv2
+import numpy as np
 
 from .corners import CornerDetector
 from .display import DisplayRenderer
@@ -20,6 +21,7 @@ from .settings import AppSettings
 from .smoother import FENSmoother
 from .stream import MJPEGStreamReader
 from .supabase_client import SupabaseGameStore
+from .types import Orientation
 from .validator import is_legal_position
 from .warp import warp_board
 
@@ -35,17 +37,25 @@ class GameStatus(str, Enum):
 class ChessVisionPipeline:
     """Coordinates stream ingestion, detection, validation, and recording."""
 
-    def __init__(self, settings: AppSettings, white_bottom: bool = True) -> None:
+    def __init__(
+        self,
+        settings: AppSettings,
+        orientation: Orientation = Orientation.OVERHEAD_WHITE_BOTTOM,
+    ) -> None:
         self.settings = settings
         cfg = settings.runtime
 
+        print(f"Connecting to stream {cfg.esp32_url} …")
         self.stream = MJPEGStreamReader(
             url=cfg.esp32_url,
             min_width=cfg.min_frame_width,
             min_height=cfg.min_frame_height,
         )
+        print("Stream connected. Loading corner model (first run can take 1–2 min on CPU) …")
         self.corner_detector = CornerDetector(cfg.corner_model_path, cfg.corner_conf, cfg.min_board_area_px)
-        self.piece_detector = PieceDetector(cfg.piece_model_path, cfg.piece_conf, cfg.warp_size, white_bottom=white_bottom)
+        print("Loading piece model …")
+        self.piece_detector = PieceDetector(cfg.piece_model_path, cfg.piece_conf, cfg.warp_size, orientation=orientation)
+        print("Models loaded. Opening display windows …")
         self.smoother = FENSmoother(cfg.smoothing_frames)
         self.display = DisplayRenderer(
             warp_size=cfg.warp_size,
@@ -63,7 +73,7 @@ class ChessVisionPipeline:
             failures_dir=cfg.failures_dir,
         )
 
-        self.white_bottom = white_bottom
+        self.orientation = orientation
         self.last_corners = None
         self.last_stable_fen = chess.STARTING_FEN
         self.last_move_san: str | None = None
@@ -71,13 +81,12 @@ class ChessVisionPipeline:
         self.last_move_to: str | None = None
         self.played_at: datetime | None = None
         self.status = GameStatus.WAITING
-        self.recorder = MoveRecorder(white_bottom=white_bottom)
-        self._latest_warped = None
+        self.recorder = MoveRecorder(orientation=orientation)
         self._latest_detections = []
         self.connection_status = "CONNECTED"
 
     def start_game(self) -> None:
-        self.recorder = MoveRecorder(white_bottom=self.white_bottom)
+        self.recorder = MoveRecorder(orientation=self.orientation)
         self.played_at = datetime.now(timezone.utc)
         self.status = GameStatus.IN_PROGRESS
         self.last_stable_fen = chess.STARTING_FEN
@@ -88,7 +97,7 @@ class ChessVisionPipeline:
 
     def abort_game(self) -> None:
         self.status = GameStatus.WAITING
-        self.recorder = MoveRecorder(white_bottom=self.white_bottom)
+        self.recorder = MoveRecorder(orientation=self.orientation)
         print("Game aborted.")
 
     def _result_to_pgn(self, result: str) -> str:
@@ -135,15 +144,17 @@ class ChessVisionPipeline:
         print("Game saved. Press 's' to start a new game.")
         self.status = GameStatus.ENDED
 
-    def process_frame(self) -> tuple | None:
+    def process_frame(self) -> np.ndarray | None:
         frame = self.stream.read_frame()
         if self.settings.runtime.rotate_180:
             frame = cv2.rotate(frame, cv2.ROTATE_180)
         corners = self.corner_detector.detect(frame)
         if corners is None:
-            raw_view = self.display.render_raw(
+            return self.display.render_chess_vision(
                 frame=frame,
                 corners=None,
+                detections=[],
+                inverse_h=None,
                 last_corners=self.last_corners,
                 connection_status=self.connection_status,
                 stable_fen=self.last_stable_fen,
@@ -152,12 +163,15 @@ class ChessVisionPipeline:
                 game_status=self.status.value,
                 last_move_san=self.last_move_san,
             )
-            board_view = self._latest_warped if self._latest_warped is not None else frame
-            return raw_view, board_view
 
         self.last_corners = corners
-        warped, _ = warp_board(frame, corners, self.settings.runtime.warp_size)
+        warped, h_matrix = warp_board(frame, corners, self.settings.runtime.warp_size)
         detections = self.piece_detector.detect(warped)
+        if detections:
+            top_conf = max(d.confidence for d in detections)
+            logger.info("Detected %d pieces (top conf: %.2f)", len(detections), top_conf)
+        if getattr(self, "_show_warped_debug", False):
+            cv2.imshow("Warped (model input)", warped)
         board_map = self.piece_detector.to_board_map(detections)
         if board_map:
             fen = build_fen(
@@ -183,9 +197,17 @@ class ChessVisionPipeline:
                         print(f"FEN: {event.fen_after}")
                         print("----------------------------------------------------")
 
-        raw_view = self.display.render_raw(
+        inverse_h = None
+        try:
+            inverse_h = np.linalg.inv(h_matrix)
+        except Exception:  # noqa: BLE001
+            inverse_h = None
+
+        vision_view = self.display.render_chess_vision(
             frame=frame,
             corners=corners,
+            detections=detections,
+            inverse_h=inverse_h,
             last_corners=self.last_corners,
             connection_status=self.connection_status,
             stable_fen=self.last_stable_fen,
@@ -194,24 +216,28 @@ class ChessVisionPipeline:
             game_status=self.status.value,
             last_move_san=self.last_move_san,
         )
-        board_view = self.display.render_board(warped, detections, self.last_move_from, self.last_move_to)
-        self._latest_warped = board_view
         self._latest_detections = detections
-        return raw_view, board_view
+        return vision_view
 
     def run(self) -> None:
-        cv2.namedWindow("Chess Vision")
-        cv2.namedWindow("Board View")
+        cv2.namedWindow("Chess Vision", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Chess Vision", 1280, 720)
+        self._show_warped_debug = False
+        print(
+            "Click the 'Chess Vision' window to focus it, then use keys: "
+            "q=quit  s=start  a=abort  r=resign  e=end-game  w=toggle warped-debug window"
+        )
         try:
             while True:
-                views = self.process_frame()
-                if views:
-                    raw_view, board_view = views
-                    cv2.imshow("Chess Vision", raw_view)
-                    cv2.imshow("Board View", board_view)
+                view = self.process_frame()
+                if view is not None:
+                    cv2.imshow("Chess Vision", view)
 
                 key = cv2.waitKey(1) & 0xFF
+                if key == 0xFF:
+                    continue
                 if key == ord("q"):
+                    print("Quitting…")
                     break
                 if key == ord("s"):
                     self.start_game()
@@ -223,6 +249,13 @@ class ChessVisionPipeline:
                 elif key == ord("e"):
                     result = input("Result? (w/b/d): ").strip().lower()
                     self.end_game({"w": "white", "b": "black", "d": "draw"}.get(result, "unknown"))
+                elif key == ord("w"):
+                    self._show_warped_debug = not self._show_warped_debug
+                    if not self._show_warped_debug:
+                        cv2.destroyWindow("Warped (model input)")
+                    print(f"Warped debug window: {'ON' if self._show_warped_debug else 'OFF'}")
+                else:
+                    logger.debug("Unhandled key: %s", key)
         finally:
             self.stream.close()
             cv2.destroyAllWindows()

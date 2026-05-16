@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .types import BoardMap, DetectedPiece
+from .types import BoardMap, DetectedPiece, Orientation
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,13 @@ def _square_name(file_idx: int, rank_idx: int) -> str:
 class PieceDetector:
     """Detect pieces in a warped board and map them to board squares."""
 
-    def __init__(self, model_path: str, conf: float, warp_size: int, white_bottom: bool = True) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        conf: float,
+        warp_size: int,
+        orientation: Orientation = Orientation.OVERHEAD_WHITE_BOTTOM,
+    ) -> None:
         if not Path(model_path).exists():
             raise FileNotFoundError(f"Piece model not found: {model_path}")
         from ultralytics import YOLO  # lazy import for tests
@@ -46,7 +52,7 @@ class PieceDetector:
         self.model = YOLO(model_path)
         self.conf = conf
         self.warp_size = warp_size
-        self.white_bottom = white_bottom
+        self.orientation = orientation
 
     def detect(self, warped_frame: np.ndarray) -> list[DetectedPiece]:
         if warped_frame.shape[:2] != (self.warp_size, self.warp_size):
@@ -76,6 +82,44 @@ class PieceDetector:
             detections.append(DetectedPiece(label=label, confidence=conf, x1=x1, y1=y1, x2=x2, y2=y2))
         return detections
 
+    def _pixel_to_square(self, cx: float, cy: float, cell: int) -> tuple[int, int]:
+        """Convert pixel centre coordinates to (rank_idx, file_idx) chess indices.
+
+        rank_idx 0  = chess rank 8 (black's back rank)
+        rank_idx 7  = chess rank 1 (white's back rank)
+        file_idx 0  = file a, file_idx 7 = file h
+
+        Side-view orientations swap the x/y axes so that the depth axis of the
+        board (ranks 1-8) runs left-to-right across the image instead of
+        top-to-bottom, equivalent to a 90° rotation of the overhead view.
+        """
+        col = int(cx // cell)   # raw x grid index (0 = left)
+        row = int(cy // cell)   # raw y grid index (0 = top)
+
+        if self.orientation == Orientation.OVERHEAD_WHITE_BOTTOM:
+            # Standard: x→file, y→rank (rank 8 at top, rank 1 at bottom)
+            return row, col
+
+        if self.orientation == Orientation.OVERHEAD_WHITE_TOP:
+            # 180° flip of the above
+            return 7 - row, 7 - col
+
+        if self.orientation == Orientation.SIDE_WHITE_LEFT:
+            # 90° CW rotation of OVERHEAD_WHITE_BOTTOM:
+            #   left of image = rank 1 (white's back rank)
+            #   top of image  = file a
+            rank_idx = 7 - col   # col 0 (left) → rank_idx 7 → chess rank 1
+            file_idx = row       # row 0 (top)  → file_idx 0 → file a
+            return rank_idx, file_idx
+
+        # SIDE_WHITE_RIGHT
+        # 90° CCW rotation of OVERHEAD_WHITE_BOTTOM:
+        #   right of image = rank 1 (white's back rank)
+        #   top of image   = file h
+        rank_idx = col           # col 7 (right) → rank_idx 7 → chess rank 1
+        file_idx = 7 - row       # row 0 (top)   → file_idx 7 → file h
+        return rank_idx, file_idx
+
     def to_board_map(self, detections: list[DetectedPiece]) -> BoardMap | None:
         board_map: BoardMap = {}
         cell = self.warp_size // 8
@@ -85,11 +129,7 @@ class PieceDetector:
             if not (0 <= cx < self.warp_size and 0 <= cy < self.warp_size):
                 logger.warning("Skipping out-of-bounds detection for %s", det.label)
                 continue
-            file_idx = int(cx // cell)
-            rank_idx = int(cy // cell)
-            if not self.white_bottom:
-                file_idx = 7 - file_idx
-                rank_idx = 7 - rank_idx
+            rank_idx, file_idx = self._pixel_to_square(cx, cy, cell)
             board_map[(rank_idx, file_idx)] = PIECE_TO_FEN[det.label]
             det.square = _square_name(file_idx, rank_idx)
 
