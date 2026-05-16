@@ -1,4 +1,4 @@
-"""ESP32 MJPEG stream reader."""
+"""MJPEG stream reader for phone bridge or ESP32 sources."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .errors import StreamConnectionError
 
 
 class MJPEGStreamReader:
-    """Read and validate frames from an ESP32 MJPEG stream."""
+    """Read and validate frames from an MJPEG stream source."""
 
     def __init__(
         self,

@@ -1,9 +1,9 @@
 # Chess Vision Recorder
 
-Real-time chess game recorder using an ESP32-CAM stream, YOLOv8 detection, perspective warping, move legality checks, PGN export, and optional Supabase persistence.
+Real-time chess game recorder using a phone camera stream (Expo + desktop bridge), YOLOv8 detection, perspective warping, move legality checks, PGN export, and optional Supabase persistence.
 
 This repository is designed for:
-- **Live board capture** from ESP32-CAM MJPEG stream
+- **Live board capture** from iPhone/Android camera via Expo + bridge MJPEG stream
 - **Board understanding** (corner detection + piece detection)
 - **Game reconstruction** (FEN smoothing + legal move parsing with `python-chess`)
 - **Export + storage** (PGN files locally, optional Supabase insert)
@@ -51,7 +51,7 @@ Chess-YOKOv8-vision/
 ## 2) How It Works (High-Level)
 
 Per frame:
-1. Read frame from ESP32 MJPEG stream.
+1. Read frame from MJPEG stream (phone bridge by default, ESP32 optional).
 2. Optionally rotate frame 180 in software (`config.yaml`).
 3. Detect board corners (YOLO corners model).
 4. Warp to top-down board view.
@@ -74,7 +74,8 @@ Game end:
 - Windows 10/11 (or Linux/macOS)
 - Python **3.12** recommended in this repo currently
 - NVIDIA GPU supported (tested with RTX 4070 Laptop GPU)
-- ESP32-CAM (AI Thinker pinout in firmware)
+- Phone with Expo Go (recommended camera source)
+- ESP32-CAM is optional legacy hardware source
 
 Python dependencies are in `requirements.txt`.
 
@@ -108,7 +109,85 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 
 ---
 
-## 5) ESP32-CAM Firmware Setup
+## 5) Phone Camera Setup (Default: Native iPhone Streamer + Bridge)
+
+Use this by default (no ESP32 required).
+
+### Preferred (no install): Safari web streamer (Next.js)
+
+Use `web_streamer/` on iPhone Safari — live camera via browser, no AltStore or Expo:
+
+```powershell
+cd web_streamer
+npm install
+npm run dev
+```
+
+Open `http://<PC_LAN_IP>:3000` on iPhone. See `web_streamer/README.md`.
+
+### Native iPhone streamer (AltStore path)
+
+Use the native app in `ios_phone_streamer/` for true video-frame streaming:
+
+1. On a Mac, generate/open the iOS project:
+
+   ```bash
+   brew install xcodegen
+   cd ios_phone_streamer
+   xcodegen generate
+   open PhoneStreamer.xcodeproj
+   ```
+
+2. Build and sideload with AltStore.
+3. Continue with steps below to run the desktop bridge + pipeline.
+
+For native app setup details, see `ios_phone_streamer/README.md`.
+
+### Fallback: Expo app (snapshot-based)
+
+1. Start the phone bridge on your PC (repo root):
+
+   ```powershell
+   .\.venv\Scripts\python code/phone_stream_bridge.py --host 0.0.0.0 --port 8080
+   ```
+
+2. Start the Expo mobile app:
+
+   ```powershell
+   cd mobile
+   npm install
+   npx expo start
+   ```
+
+3. Open Expo Go on iPhone and scan the QR code.
+4. In the app, set:
+   - Host = your PC LAN IP (run `ipconfig` on Windows)
+   - Port = `8080`
+5. Press **Start Streaming** in the app.
+6. Verify stream on desktop:
+
+   ```powershell
+   .\.venv\Scripts\python code/view_esp32_stream.py --url http://127.0.0.1:8080/stream
+   ```
+
+7. Point the pipeline to the phone bridge in `config.yaml`:
+   - `esp32_url: "http://127.0.0.1:8080/stream"`
+
+8. Run the main app:
+
+   ```powershell
+   .\.venv\Scripts\python main.py
+   ```
+
+Notes:
+- Keep the iPhone app in the foreground while streaming.
+- Allow inbound TCP port `8080` on Windows firewall (Private network) if connection fails.
+- For Expo details, see `mobile/README.md`.
+- For native iOS details, see `ios_phone_streamer/README.md`.
+
+---
+
+## 6) ESP32-CAM Firmware Setup (Optional Legacy Source)
 
 File: `code/esp32_cam_stream.ino`
 
@@ -121,19 +200,7 @@ File: `code/esp32_cam_stream.ino`
 5. Open Serial Monitor and read stream URL:
    - `http://<esp32-ip>:81/stream`
 
-### Rotation on ESP
-
-Firmware includes:
-
-```cpp
-const bool ROTATE_180 = true;
-```
-
-If your camera is physically upside down, keep this `true`.
-
----
-
-## 6) Config File
+## 7) Config File
 
 File: `config.yaml`
 
@@ -153,7 +220,7 @@ Important keys:
 
 ---
 
-## 7) Training Models
+## 8) Training Models
 
 File: `code/train_models.py`
 
@@ -210,7 +277,7 @@ You should have both `models/pieces.pt` and `models/corners.pt` before running `
 
 ---
 
-## 8) Running the App
+## 9) Running the App
 
 ```powershell
 .\.venv\Scripts\python main.py
@@ -238,7 +305,7 @@ Keyboard controls:
 
 ---
 
-## 9) Supabase
+## 10) Supabase
 
 Module: `src/supabase_client.py`
 
@@ -253,7 +320,7 @@ Gameplay is designed to keep local PGN as source-of-truth.
 
 ---
 
-## 10) Core Modules and Responsibilities
+## 11) Core Modules and Responsibilities
 
 - `src/stream.py`  
   ESP32 URL validation, reachability check, frame validation, retry/backoff.
@@ -290,7 +357,7 @@ Gameplay is designed to keep local PGN as source-of-truth.
 
 ---
 
-## 11) Tests
+## 12) Tests
 
 Run tests:
 
@@ -313,7 +380,7 @@ Current suite covers:
 
 ---
 
-## 12) Troubleshooting
+## 13) Troubleshooting
 
 ### A) `CUDA is not available`
 - Ensure CUDA wheel installed in `.venv`:
@@ -344,7 +411,7 @@ Current suite covers:
 
 ---
 
-## 13) Operational Notes
+## 14) Operational Notes
 
 - Keep `.venv/` out of git (already ignored).
 - Keep `.env` private.
@@ -353,7 +420,7 @@ Current suite covers:
 
 ---
 
-## 14) Quick Start (Minimal)
+## 15) Quick Start (Minimal)
 
 ```powershell
 py -3.12 -m venv .venv

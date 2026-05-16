@@ -1,4 +1,4 @@
-esp32_url: "http://192.168.0.14:81/stream"
+esp32_url: "http://127.0.0.1:8080/stream"
 corner_model_path: "models/corners.pt"
 piece_model_path: "models/pieces.pt"
 corner_conf: 0.5
