@@ -137,6 +137,8 @@ class ChessVisionPipeline:
 
     def process_frame(self) -> tuple | None:
         frame = self.stream.read_frame()
+        if self.settings.runtime.rotate_180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
         corners = self.corner_detector.detect(frame)
         if corners is None:
             raw_view = self.display.render_raw(

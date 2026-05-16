@@ -22,6 +22,7 @@ class RuntimeSettings(BaseModel):
     min_board_area_px: int = Field(gt=0)
     min_frame_width: int = Field(gt=0)
     min_frame_height: int = Field(gt=0)
+    rotate_180: bool = False
     exports_dir: str
     failures_dir: str
     opening_book_path: str | None = None

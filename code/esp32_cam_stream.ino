@@ -13,6 +13,7 @@
 // -----------------------------
 const char* WIFI_SSID = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const bool ROTATE_180 = true;  // true = enable sensor mirror+flip (180-degree rotation)
 
 // AI Thinker ESP32-CAM pins
 #define PWDN_GPIO_NUM     32
@@ -153,6 +154,12 @@ void setup_camera() {
     while (true) {
       delay(1000);
     }
+  }
+
+  sensor_t* sensor = esp_camera_sensor_get();
+  if (sensor != NULL) {
+    sensor->set_vflip(sensor, ROTATE_180 ? 1 : 0);
+    sensor->set_hmirror(sensor, ROTATE_180 ? 1 : 0);
   }
 }
 
