@@ -11,9 +11,11 @@
 // -----------------------------
 // Update these for your network
 // -----------------------------
-const char* WIFI_SSID = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-const bool ROTATE_180 = true;  // true = enable sensor mirror+flip (180-degree rotation)
+const char* WIFI_SSID = "ARRIS-409C";
+const char* WIFI_PASSWORD = "DCA6333D409C";
+const bool FLIP_VERTICAL   = true; // true = flip image upside-down
+const bool FLIP_HORIZONTAL = false; // true = correct a mirrored image
+const int  TARGET_FPS      = 15;   // target stream framerate (cap, not floor)
 
 // AI Thinker ESP32-CAM pins
 #define PWDN_GPIO_NUM     32
@@ -46,18 +48,21 @@ static esp_err_t index_handler(httpd_req_t* req) {
 static esp_err_t stream_handler(httpd_req_t* req) {
   camera_fb_t* fb = NULL;
   esp_err_t res = ESP_OK;
-  size_t jpg_len = 0;
-  uint8_t* jpg_buf = NULL;
-  char part_buf[64];
+  char header_buf[96];
 
   static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=frame";
-  static const char* _STREAM_BOUNDARY = "\r\n--frame\r\n";
-  static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+  static const char* _STREAM_HEADER_FMT =
+    "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
   res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
   if (res != ESP_OK) {
     return res;
   }
+
+  const TickType_t frame_ticks = pdMS_TO_TICKS(1000 / TARGET_FPS);
+  TickType_t last_wake = xTaskGetTickCount();
+  uint32_t frame_count = 0;
+  uint32_t fps_start_ms = millis();
 
   while (true) {
     fb = esp_camera_fb_get();
@@ -67,16 +72,11 @@ static esp_err_t stream_handler(httpd_req_t* req) {
       break;
     }
 
-    jpg_buf = fb->buf;
-    jpg_len = fb->len;
-
-    res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
+    // single combined boundary+header chunk halves TCP write overhead
+    size_t hlen = snprintf(header_buf, sizeof(header_buf), _STREAM_HEADER_FMT, fb->len);
+    res = httpd_resp_send_chunk(req, header_buf, hlen);
     if (res == ESP_OK) {
-      size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART, jpg_len);
-      res = httpd_resp_send_chunk(req, part_buf, hlen);
-    }
-    if (res == ESP_OK) {
-      res = httpd_resp_send_chunk(req, (const char*)jpg_buf, jpg_len);
+      res = httpd_resp_send_chunk(req, (const char*)fb->buf, fb->len);
     }
 
     esp_camera_fb_return(fb);
@@ -84,6 +84,16 @@ static esp_err_t stream_handler(httpd_req_t* req) {
     if (res != ESP_OK) {
       break;
     }
+
+    if (++frame_count >= 30) {
+      uint32_t elapsed = millis() - fps_start_ms;
+      Serial.printf("Stream: %.1f fps\n", (frame_count * 1000.0f) / elapsed);
+      frame_count = 0;
+      fps_start_ms = millis();
+    }
+
+    // cap at TARGET_FPS but don't block if encoding already took longer
+    vTaskDelayUntil(&last_wake, frame_ticks);
   }
 
   return res;
@@ -135,15 +145,17 @@ void setup_camera() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 24000000;        // 24MHz pixel clock — pushes OV2640 harder for higher fps
   config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_LATEST;  // always serve newest frame, drop stale ones
+  config.fb_location = CAMERA_FB_IN_PSRAM;
 
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_SVGA;   // 800x600
-    config.jpeg_quality = 10;             // lower is better quality
+    config.frame_size = FRAMESIZE_VGA;    // 640x480 — sweet spot for 15fps over WiFi
+    config.jpeg_quality = 12;             // 10–14 is the perf sweet spot; lower = bigger files = slower
     config.fb_count = 2;
   } else {
-    config.frame_size = FRAMESIZE_VGA;    // 640x480
+    config.frame_size = FRAMESIZE_QVGA;   // 320x240 — no PSRAM means tiny buffers
     config.jpeg_quality = 12;
     config.fb_count = 1;
   }
@@ -158,13 +170,15 @@ void setup_camera() {
 
   sensor_t* sensor = esp_camera_sensor_get();
   if (sensor != NULL) {
-    sensor->set_vflip(sensor, ROTATE_180 ? 1 : 0);
-    sensor->set_hmirror(sensor, ROTATE_180 ? 1 : 0);
+    sensor->set_vflip(sensor, FLIP_VERTICAL   ? 1 : 0);
+    sensor->set_hmirror(sensor, FLIP_HORIZONTAL ? 1 : 0);
   }
 }
 
 void setup_wifi() {
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);                       // huge fps win: disables 802.11 power-save latency
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);        // max TX power for stable throughput
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("Connecting to WiFi");
 

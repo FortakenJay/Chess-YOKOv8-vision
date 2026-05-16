@@ -6,3 +6,4 @@ __pycache__/
 exports/*.pgn
 exports/failures/*.json
 datasets/
+venv/
