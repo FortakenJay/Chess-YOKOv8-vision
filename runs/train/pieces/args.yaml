@@ -5,13 +5,13 @@ data: C:\Users\Jay\Desktop\Chess-YOKOv8-vision\datasets\Chess_Pieces.yolov8\data
 epochs: 120
 time: null
 patience: 25
-batch: 16
-imgsz: 960
+batch: 8
+imgsz: 800
 save: true
 save_period: -1
-cache: true
+cache: false
 device: '0'
-workers: 8
+workers: 0
 project: C:\Users\Jay\Desktop\Chess-YOKOv8-vision\runs\train
 name: pieces
 exist_ok: true
